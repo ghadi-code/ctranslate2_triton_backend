@@ -6,7 +6,6 @@ input [
     name: "INPUT_IDS"
     data_type: TYPE_INT32
     dims: [ -1 ]
-    allow_ragged_batch: true
   }
 ]
 input [
@@ -14,7 +13,6 @@ input [
     name: "TARGET_PREFIX"
     data_type: TYPE_INT32
     dims: [ -1 ]
-    allow_ragged_batch: true
   }
 ]
 output [
