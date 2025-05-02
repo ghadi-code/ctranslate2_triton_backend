@@ -792,18 +792,38 @@ public:
 
     uint64_t compute_start_ns = 0;
     SET_TIMESTAMP(compute_start_ns);
+    // ::ctranslate2::TranslationOptions options =
+    //     StateForModel()->DefaultTranslationOptions();
+    // auto max_decode_length_multiple =
+    //     StateForModel()->MaxDecodeLengthMultiple();
+    // if (max_decode_length_multiple) {
+    //   options.max_decoding_length =
+    //       *max_decode_length_multiple * max_input_seq_length;
+    // }
+    // LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
+    //             TranslationOptionsToString(options).c_str());
+    // std::vector<::ctranslate2::TranslationResult> translation_results =
+    //     seq2seq_replica->translate(inputs, target_prefix, options);
+
     ::ctranslate2::TranslationOptions options =
-        StateForModel()->DefaultTranslationOptions();
-    auto max_decode_length_multiple =
-        StateForModel()->MaxDecodeLengthMultiple();
-    if (max_decode_length_multiple) {
-      options.max_decoding_length =
-          *max_decode_length_multiple * max_input_seq_length;
+    StateForModel()->DefaultTranslationOptions();
+
+    // --- FIX: Force longer decoding and disable end_token ---
+    options.end_token = std::vector<size_t>();  // or std::vector<std::string>()
+    if (!StateForModel()->MaxDecodeLengthMultiple()) {
+      options.max_decoding_length = 512;
+    } else {
+      options.max_decoding_length = std::max(
+          512UL,
+          (*StateForModel()->MaxDecodeLengthMultiple()) * max_input_seq_length);
     }
+    // ---------------------------------------------------------
     LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
                 TranslationOptionsToString(options).c_str());
+
     std::vector<::ctranslate2::TranslationResult> translation_results =
         seq2seq_replica->translate(inputs, target_prefix, options);
+
 
     uint64_t compute_end_ns = 0;
     SET_TIMESTAMP(compute_end_ns);
@@ -824,6 +844,11 @@ public:
       std::vector<std::string> out_tokens = translation.output();
       // only output best hypotheses
       std::vector<size_t> out_ids = target_vocab.to_ids({out_tokens})[0];
+
+      
+      // ← Add your log here:
+      LOG_MESSAGE(TRITONSERVER_LOG_INFO,
+        ("Generated " + std::to_string(out_ids.size()) + " tokens").c_str());
 
       TRITONBACKEND_Output *response_output;
       std::vector<std::int64_t> out_shape = {(std::int64_t)out_ids.size()};
