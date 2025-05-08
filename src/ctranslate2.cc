@@ -837,113 +837,81 @@ public:
     
     // Check if the request is batched (i.e. multiple examples in one request)
     if (total_batch_size > 1) {
-      // Aggregate outputs from each translation result.
-      std::vector<std::vector<size_t>> all_out_ids;
-      for (auto &translation : translation_results) {
-        std::vector<std::string> out_tokens = translation.output();
-        // Convert tokens to ids (only the best hypothesis is used)
-        std::vector<size_t> out_ids = target_vocab.to_ids({out_tokens})[0];
-        all_out_ids.push_back(out_ids);
-      }
-      
-      // Determine the maximum translation length (for padding if needed)
-      size_t max_translation_length = 0;
-      for (const auto &out_ids : all_out_ids) {
-        max_translation_length = std::max(max_translation_length, out_ids.size());
-      }
-      
-      // Build a contiguous output buffer, padding translations that are shorter.
-      std::vector<size_t> combined_output;
-      combined_output.reserve(total_batch_size * max_translation_length);
-      for (size_t i = 0; i < all_out_ids.size(); ++i) {
-        const auto &ids = all_out_ids[i];
-        combined_output.insert(combined_output.end(), ids.begin(), ids.end());
-        if (ids.size() < max_translation_length) {
-          combined_output.insert(combined_output.end(),
-                                max_translation_length - ids.size(),
-                                0);  // pad value (adjust if needed)
+      size_t tr_idx = 0;
+  
+      for (uint32_t r = 0; r < request_count; ++r) {
+  
+        /* how many examples did this request carry? */
+        size_t elems_in_req = 1;
+        if (supports_batching_) {
+          TRITONBACKEND_Input* in;
+          TRITONBACKEND_RequestInput(
+              requests[r],
+              StateForModel()->InputTensorName().c_str(), &in);
+          const int64_t* sh;
+          TRITONBACKEND_InputProperties(in, nullptr, nullptr,
+                                        &sh, nullptr, nullptr, nullptr);
+          elems_in_req = sh[0];
+        }
+  
+        for (size_t j = 0; j < elems_in_req; ++j, ++tr_idx) {
+  
+          const std::vector<int32_t>& ids =
+          target_vocab.to_ids({tr[tr_idx].output()})[0];
+  
+          std::vector<int64_t> shape{ static_cast<int64_t>(ids.size()) };
+  
+          TRITONBACKEND_Output* out;
+          RESPOND_AND_SET_NULL_IF_ERROR(
+              &responses[r],
+              TRITONBACKEND_ResponseOutput(
+                  responses[r], &out,
+                  StateForModel()->OutputTensorName().c_str(),
+                  TRITONSERVER_TYPE_INT32,
+                  shape.data(), shape.size()));
+  
+          if (out != nullptr) {
+            void* buf;
+            size_t bytes = ids.size() * sizeof(int32_t);
+            TRITONSERVER_MemoryType mt = TRITONSERVER_MEMORY_CPU;  int64_t id = 0;
+            RESPOND_AND_SET_NULL_IF_ERROR(
+                &responses[r],
+                TRITONBACKEND_OutputBuffer(out, &buf, bytes, &mt, &id));
+            std::memcpy(buf, ids.data(), bytes);
+          }
         }
       }
-      
-      // Create the output tensor shape: [total_batch_size, max_translation_length]
-      std::vector<std::int64_t> out_shape = {
-          static_cast<int64_t>(total_batch_size),
-          static_cast<int64_t>(max_translation_length)
-      };
+  
+    //------------------------------------------------------------------
+    //  SINGLE-ITEM branch  (unchanged, but 32-bit IDs now)
+    //------------------------------------------------------------------
+    }  else {
+      for (size_t idx = 0; idx < translation_results.size(); ++idx) {
+        const std::vector<int32_t>& ids =
+            target_vocab.to_ids({translation_results[idx].output()})[0];
     
-      TRITONBACKEND_Output *response_output;
-      // Since there is a single batched response, use responses[0].
-      RESPOND_AND_SET_NULL_IF_ERROR(
-          &responses[0],
-          TRITONBACKEND_ResponseOutput(
-              responses[0],
-              &response_output,
-              StateForModel()->OutputTensorName().c_str(),
-              StateForModel()->OutputDataType(),
-              out_shape.data(),
-              out_shape.size()));
+        std::vector<int64_t> shape = { static_cast<int64_t>(ids.size()) };
+        if (supports_first_dim_batching)
+          shape.insert(shape.begin(), 1);
     
-      // Allocate the output buffer and write the combined output.
-      void *out_buffer;
-      size_t out_buffer_size =
-          TritonTypeSize(StateForModel()->OutputDataType()) * combined_output.size();
-      TRITONSERVER_MemoryType actual_memory_type = TRITONSERVER_MEMORY_CPU;
-      int64_t actual_memory_type_id = 0;
-      RESPOND_AND_SET_NULL_IF_ERROR(
-          &responses[0],
-          TRITONBACKEND_OutputBuffer(
-              response_output,
-              &out_buffer,
-              out_buffer_size,
-              &actual_memory_type,
-              &actual_memory_type_id));
-      ToOutBuffer(combined_output, StateForModel()->OutputDataType(), out_buffer);
-    } else {
-      // Single example request remains unchanged.
-      size_t idx = 0;
-      for (auto &translation : translation_results) {
-        std::vector<std::string> out_tokens = translation.output();
-        std::vector<size_t> out_ids = target_vocab.to_ids({out_tokens})[0];
-    
-        TRITONBACKEND_Output *response_output;
-        std::vector<std::int64_t> out_shape;
-        if (supports_first_dim_batching) {
-          out_shape = {(int64_t)1, (int64_t)out_ids.size()};
-        } else {
-          out_shape = {(int64_t)out_ids.size()};
-        }
-    
+        TRITONBACKEND_Output* out;
         RESPOND_AND_SET_NULL_IF_ERROR(
             &responses[idx],
             TRITONBACKEND_ResponseOutput(
-                responses[idx],
-                &response_output,
+                responses[idx], &out,
                 StateForModel()->OutputTensorName().c_str(),
-                StateForModel()->OutputDataType(),
-                out_shape.data(),
-                out_shape.size()));
+                TRITONSERVER_TYPE_INT32,   // <<< 32-bit
+                shape.data(), shape.size()));
     
-        if (responses[idx] != nullptr) {
-          std::vector<int64_t> actual_shape = {(int64_t)1, (int64_t)out_ids.size()};
-          if (!supports_first_dim_batching) {
-            actual_shape.erase(actual_shape.begin());
-          }
-          void *out_buffer;
-          size_t out_buffer_size =
-              TritonTypeSize(StateForModel()->OutputDataType()) * out_ids.size();
-          TRITONSERVER_MemoryType actual_memory_type = TRITONSERVER_MEMORY_CPU;
-          int64_t actual_memory_type_id = 0;
+        if (out != nullptr) {
+          void* buf;
+          size_t bytes = ids.size() * sizeof(int32_t);
+          TRITONSERVER_MemoryType mt = TRITONSERVER_MEMORY_CPU;  int64_t id = 0;
           RESPOND_AND_SET_NULL_IF_ERROR(
               &responses[idx],
-              TRITONBACKEND_OutputBuffer(
-                  response_output,
-                  &out_buffer,
-                  out_buffer_size,
-                  &actual_memory_type,
-                  &actual_memory_type_id));
-          ToOutBuffer(out_ids, StateForModel()->OutputDataType(), out_buffer);
+              TRITONBACKEND_OutputBuffer(out, &buf, bytes, &mt, &id));
+          std::memcpy(buf, ids.data(), bytes);
         }
-        idx += 1;
       }
     }
     
@@ -1102,4 +1070,4 @@ TRITONBACKEND_ModelInstanceExecute(TRITONBACKEND_ModelInstance *instance,
 } // namespace triton
 
 
-////ghadi backend !!!!!!!!!!!!!!
+////ghadi backend version_1 !!!!!!!!!!!!!!
