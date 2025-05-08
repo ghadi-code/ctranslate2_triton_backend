@@ -32,6 +32,7 @@
 #include <string>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include "triton/backend/backend_common.h"
 #include "triton/backend/backend_input_collector.h"
@@ -836,12 +837,15 @@ public:
     );
     
     // Check if the request is batched (i.e. multiple examples in one request)
+    // ------------------------------------------------------------------
+    //  BATCHED REQUESTS
+    // ------------------------------------------------------------------
     if (total_batch_size > 1) {
-      size_t tr_idx = 0;
-  
+      size_t tr_idx = 0;                 // index into translation_results
+
       for (uint32_t r = 0; r < request_count; ++r) {
-  
-        /* how many examples did this request carry? */
+
+        /* how many examples are inside this Triton request?               */
         size_t elems_in_req = 1;
         if (supports_batching_) {
           TRITONBACKEND_Input* in;
@@ -853,14 +857,25 @@ public:
                                         &sh, nullptr, nullptr, nullptr);
           elems_in_req = sh[0];
         }
-  
+
         for (size_t j = 0; j < elems_in_req; ++j, ++tr_idx) {
-  
-          const std::vector<int32_t>& ids =
-          target_vocab.to_ids({tr[tr_idx].output()})[0];
-  
-          std::vector<int64_t> shape{ static_cast<int64_t>(ids.size()) };
-  
+
+          /* --------------------------------------------------------------
+          * 1. strings → integer IDs
+          * -------------------------------------------------------------- */
+          const auto ids_size_t =
+              target_vocab.to_ids({translation_results[tr_idx].output()},
+                                  /*unk_id      */ 1,
+                                  /*prepend_bos */ false,
+                                  /*append_eos  */ false)[0];
+
+          std::vector<int32_t> ids(ids_size_t.begin(), ids_size_t.end());
+
+          /* --------------------------------------------------------------
+          * 2. create output tensor
+          * -------------------------------------------------------------- */
+          std::vector<int64_t> shape{static_cast<int64_t>(ids.size())};
+
           TRITONBACKEND_Output* out;
           RESPOND_AND_SET_NULL_IF_ERROR(
               &responses[r],
@@ -869,11 +884,15 @@ public:
                   StateForModel()->OutputTensorName().c_str(),
                   TRITONSERVER_TYPE_INT32,
                   shape.data(), shape.size()));
-  
+
+          /* --------------------------------------------------------------
+          * 3. copy data
+          * -------------------------------------------------------------- */
           if (out != nullptr) {
             void* buf;
             size_t bytes = ids.size() * sizeof(int32_t);
-            TRITONSERVER_MemoryType mt = TRITONSERVER_MEMORY_CPU;  int64_t id = 0;
+            TRITONSERVER_MemoryType mt = TRITONSERVER_MEMORY_CPU;
+            int64_t id = 0;
             RESPOND_AND_SET_NULL_IF_ERROR(
                 &responses[r],
                 TRITONBACKEND_OutputBuffer(out, &buf, bytes, &mt, &id));
@@ -881,32 +900,38 @@ public:
           }
         }
       }
-  
-    //------------------------------------------------------------------
-    //  SINGLE-ITEM branch  (unchanged, but 32-bit IDs now)
-    //------------------------------------------------------------------
-    }  else {
+
+    // ------------------------------------------------------------------
+    //  SINGLE EXAMPLE PER REQUEST
+    // ------------------------------------------------------------------
+    } else {
       for (size_t idx = 0; idx < translation_results.size(); ++idx) {
-        const std::vector<int32_t>& ids =
-            target_vocab.to_ids({translation_results[idx].output()})[0];
-    
-        std::vector<int64_t> shape = { static_cast<int64_t>(ids.size()) };
+
+        const auto ids_size_t =
+            target_vocab.to_ids({translation_results[idx].output()},
+                                /*unk_id      */ 1,
+                                /*prepend_bos */ false,
+                                /*append_eos  */ false)[0];
+        std::vector<int32_t> ids(ids_size_t.begin(), ids_size_t.end());
+
+        std::vector<int64_t> shape{static_cast<int64_t>(ids.size())};
         if (supports_first_dim_batching)
           shape.insert(shape.begin(), 1);
-    
+
         TRITONBACKEND_Output* out;
         RESPOND_AND_SET_NULL_IF_ERROR(
             &responses[idx],
             TRITONBACKEND_ResponseOutput(
                 responses[idx], &out,
                 StateForModel()->OutputTensorName().c_str(),
-                TRITONSERVER_TYPE_INT32,   // <<< 32-bit
+                TRITONSERVER_TYPE_INT32,
                 shape.data(), shape.size()));
-    
+
         if (out != nullptr) {
           void* buf;
           size_t bytes = ids.size() * sizeof(int32_t);
-          TRITONSERVER_MemoryType mt = TRITONSERVER_MEMORY_CPU;  int64_t id = 0;
+          TRITONSERVER_MemoryType mt = TRITONSERVER_MEMORY_CPU;
+          int64_t id = 0;
           RESPOND_AND_SET_NULL_IF_ERROR(
               &responses[idx],
               TRITONBACKEND_OutputBuffer(out, &buf, bytes, &mt, &id));
@@ -914,7 +939,7 @@ public:
         }
       }
     }
-    
+
     // Send all the responses that haven't already been sent because of
     // an earlier error.
     for (auto &response : responses) {
