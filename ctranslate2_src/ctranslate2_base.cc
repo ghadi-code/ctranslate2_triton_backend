@@ -12,7 +12,7 @@
 //    contributors may be used to endorse or promote products derived
 //    from this software without specific prior written permission.
 //
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS `AS IS'' AND ANY
 // EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
 // IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
 // PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
@@ -100,6 +100,8 @@ public:
     THROW_IF_BACKEND_MODEL_ERROR(ValidateModel());
     THROW_IF_BACKEND_MODEL_ERROR(ValidateModelConfig());
   }
+
+  
 
   TRITONSERVER_Error *ValidateModelConfig() {
     // If verbose logging is enabled, dump the model's configuration as
@@ -537,7 +539,6 @@ TRITONSERVER_Error *InputBufferToRaggedTokens(
       &batchn_byte_size, &memory_type, &memory_type_id));
 
   // bool is_ragged =
-  //
   size_t max_seq_length = 0;
   if (is_ragged_input) {
     int64_t total_elements = 0;
@@ -568,42 +569,54 @@ TRITONSERVER_Error *InputBufferToRaggedTokens(
       ToIdVector(input_buffer, input_dt, &ids, total_elements, element_count);
       total_elements += element_count;
       tokens.emplace_back(ids);
-    }
-  } else {
-    // input type is the same for all
+    }  
+  } else {  
     TRITONBACKEND_Input *input;
+    
     RETURN_IF_ERROR(
-        TRITONBACKEND_RequestInput(requests[0], input_name.c_str(), &input));
-
+        TRITONBACKEND_RequestInput(requests[0], input_name.c_str(), &input));  //here the input
+  
     TRITONSERVER_DataType input_dt;
     const int64_t *input_shape;
     uint32_t input_dims_count;
+  
     RETURN_IF_ERROR(
         TRITONBACKEND_InputProperties(input, nullptr, &input_dt, &input_shape,
                                       &input_dims_count, nullptr, nullptr));
-
+  
     if (input_dims_count > 2) {
       return TRITONSERVER_ErrorNew(
           TRITONSERVER_ERROR_INVALID_ARG,
-          std::string("Inputs with more than two dimensions unsupported")
-              .c_str());
+          std::string("Inputs with more than two dimensions unsupported").c_str());
     }
-
-    std::vector<int64_t> batchn_shape =
-        std::vector<int64_t>(input_shape, input_shape + input_dims_count);
+  
+    std::vector<int64_t> batchn_shape(input_shape, input_shape + input_dims_count);
     if (supports_batching) {
       batchn_shape[0] = total_batch_size;
     }
-
+  
+    // NEW: Get input buffer and log full raw input values
+    const void* input_buffer;
+    size_t input_byte_size;
+    TRITONSERVER_MemoryType memory_type;
+    int64_t memory_type_id;
+  
+    RETURN_IF_ERROR(TRITONBACKEND_InputBuffer(
+        input, 0, &input_buffer, &input_byte_size,
+        &memory_type, &memory_type_id));
+  
+    // Per-batch vector extraction
     for (size_t vector_idx = 0; vector_idx < total_batch_size; vector_idx++) {
       std::vector<size_t> ids;
-      ToIdVector(input_buffer, input_dt, &ids, vector_idx * batchn_shape[1],
-                 (vector_idx + 1) * batchn_shape[1]);
+      ToIdVector(reinterpret_cast<const char*>(input_buffer), input_dt, &ids, vector_idx * batchn_shape[1],
+                batchn_shape[1]);
+  
       tokens.emplace_back(ids);
     }
+  
     max_seq_length = static_cast<size_t>(batchn_shape[1]);
   }
-
+  
   *ragged_tokens = tokens;
   *max_sequence_length = max_seq_length;
 
@@ -659,26 +672,38 @@ public:
               const ::ctranslate2::Vocabulary &target_vocab,
               std::vector<std::vector<std::string>> *input_tokens,
               std::vector<std::vector<std::string>> *input_target_prefix,
-              size_t *max_sequence_length) {
-
+              size_t *max_sequence_length)
+  {
     std::vector<std::vector<size_t>> input_token_ids;
-    RETURN_IF_ERROR(InputBufferToRaggedTokens(
-        total_batch_size, requests, request_count, responses, collector,
+
+    RETURN_IF_ERROR(
+      InputBufferToRaggedTokens(
+        total_batch_size,
+        requests,
+        request_count,
+        responses,
+        collector,
         &input_token_ids, max_sequence_length,
         StateForModel()->InputTensorName(),
         StateForModel()->IsInputRagged(StateForModel()->InputTensorName()),
-        supports_batching_));
+        supports_batching_)
+      );
+
     *input_tokens = source_vocab.to_tokens(input_token_ids);
+
+    // Handle optional target prefix input
     if (StateForModel()->TargetPrefixInputName()) {
+
       std::vector<std::vector<size_t>> target_prefix_token_ids;
       size_t discard_seq_length;
+
       RETURN_IF_ERROR(InputBufferToRaggedTokens(
           total_batch_size, requests, request_count, responses, collector,
           &target_prefix_token_ids, &discard_seq_length,
           *(StateForModel()->TargetPrefixInputName()),
-          StateForModel()->IsInputRagged(
-              *(StateForModel()->TargetPrefixInputName())),
+          StateForModel()->IsInputRagged(*(StateForModel()->TargetPrefixInputName())),
           supports_batching_));
+
       *input_target_prefix = target_vocab.to_tokens(target_prefix_token_ids);
     }
     return nullptr;
@@ -762,11 +787,11 @@ public:
     const auto target_vocab = seq2seq_model->get_target_vocabulary();
 
     auto collector = std::make_unique<BackendInputCollector>(
-        requests, request_count, &responses,
-        model_state_->TritonMemoryManager(),
-        model_state_->EnablePinnedInput() /* pinned_enabled */,
-        nullptr /* stream*/);
-
+      requests, request_count, &responses,
+      model_state_->TritonMemoryManager(),
+      model_state_->EnablePinnedInput() /* pinned_enabled */,
+      nullptr /* stream*/);
+  
     std::vector<std::vector<std::string>> inputs;
     std::vector<std::vector<std::string>> target_prefix;
     size_t max_input_seq_length;
@@ -775,107 +800,121 @@ public:
         CreateInput(total_batch_size, requests, request_count, &responses,
                     collector.get(), source_vocab, target_vocab, &inputs,
                     &target_prefix, &max_input_seq_length));
-
+    
     std::unique_ptr<::ctranslate2::models::SequenceToSequenceReplica>
         seq2seq_replica = model_->as_sequence_to_sequence();
-
-    // Finalize the collector. If 'true' is returned, 'input_buffer'
-    // will not be valid until the backend synchronizes the CUDA
-    // stream or event that was used when creating the collector. For
-    // this backend, GPU is not supported and so no CUDA sync should
-    // be needed; so if 'true' is returned simply log an error.
+    
+    // Finalize the collector...
     const bool need_cuda_input_sync = collector->Finalize();
     if (need_cuda_input_sync) {
       LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
                   "backend: unexpected CUDA sync required by collector");
     }
-
+    
     uint64_t compute_start_ns = 0;
     SET_TIMESTAMP(compute_start_ns);
-    // ::ctranslate2::TranslationOptions options =
-    //     StateForModel()->DefaultTranslationOptions();
-    // auto max_decode_length_multiple =
-    //     StateForModel()->MaxDecodeLengthMultiple();
-    // if (max_decode_length_multiple) {
-    //   options.max_decoding_length =
-    //       *max_decode_length_multiple * max_input_seq_length;
-    // }
-    // LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
-    //             TranslationOptionsToString(options).c_str());
-    // std::vector<::ctranslate2::TranslationResult> translation_results =
-    //     seq2seq_replica->translate(inputs, target_prefix, options);
-
     ::ctranslate2::TranslationOptions options =
-    StateForModel()->DefaultTranslationOptions();
-
-    // --- FIX: Force longer decoding and disable end_token ---
-    options.end_token = std::vector<size_t>();  // or std::vector<std::string>()
-    if (!StateForModel()->MaxDecodeLengthMultiple()) {
-      options.max_decoding_length = 512;
-    } else {
-      options.max_decoding_length = std::max(
-          512UL,
-          (*StateForModel()->MaxDecodeLengthMultiple()) * max_input_seq_length);
+        StateForModel()->DefaultTranslationOptions();
+    auto max_decode_length_multiple = StateForModel()->MaxDecodeLengthMultiple();
+    if (max_decode_length_multiple) {
+      options.max_decoding_length =
+          *max_decode_length_multiple * max_input_seq_length;
     }
-    // ---------------------------------------------------------
     LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
                 TranslationOptionsToString(options).c_str());
-
     std::vector<::ctranslate2::TranslationResult> translation_results =
         seq2seq_replica->translate(inputs, target_prefix, options);
-
-
+    
     uint64_t compute_end_ns = 0;
     SET_TIMESTAMP(compute_end_ns);
-
-    // This backend supports models that batch along the first dimension
-    // and those that don't batch. For non-batch models the output shape
-    // will be [ 4 ]. For batch models the output shape will be [ -1, 4
-    // ] and the backend "responder" utility below will set the
-    // appropriate batch dimension value for each response.
-    std::vector<int64_t> output_batch_shape;
+    
+    // Determine if first-dimension batching is supported.
     bool supports_first_dim_batching;
-    RESPOND_ALL_AND_SET_NULL_IF_ERROR(responses, request_count,
-                                      StateForModel()->SupportsFirstDimBatching(
-                                          &supports_first_dim_batching));
-    size_t idx = 0;
-    for (auto &translation : translation_results) {
-
-      std::vector<std::string> out_tokens = translation.output();
-      // only output best hypotheses
-      std::vector<size_t> out_ids = target_vocab.to_ids({out_tokens})[0];
-
-      
-      // ← Add your log here:
-      LOG_MESSAGE(TRITONSERVER_LOG_INFO,
-        ("Generated " + std::to_string(out_ids.size()) + " tokens").c_str());
-
-      TRITONBACKEND_Output *response_output;
-      std::vector<std::int64_t> out_shape = {(std::int64_t)out_ids.size()};
-      if (supports_first_dim_batching) {
-        out_shape.insert(out_shape.begin(), -1);
+    RESPOND_ALL_AND_SET_NULL_IF_ERROR(
+        responses, request_count,
+        StateForModel()->SupportsFirstDimBatching(&supports_first_dim_batching)
+    );
+    
+    // Check if the request is batched (i.e. multiple examples in one request)
+    if (total_batch_size > 1) {
+      size_t tr_idx = 0;
+  
+      for (uint32_t r = 0; r < request_count; ++r) {
+  
+        /* how many examples did this request carry? */
+        size_t elems_in_req = 1;
+        if (supports_batching_) {
+          TRITONBACKEND_Input* in;
+          TRITONBACKEND_RequestInput(
+              requests[r],
+              StateForModel()->InputTensorName().c_str(), &in);
+          const int64_t* sh;
+          TRITONBACKEND_InputProperties(in, nullptr, nullptr,
+                                        &sh, nullptr, nullptr, nullptr);
+          elems_in_req = sh[0];
+        }
+  
+        for (size_t j = 0; j < elems_in_req; ++j, ++tr_idx) {
+  
+          const std::vector<int32_t>& ids =
+          target_vocab.to_ids({tr[tr_idx].output()})[0];
+  
+          std::vector<int64_t> shape{ static_cast<int64_t>(ids.size()) };
+  
+          TRITONBACKEND_Output* out;
+          RESPOND_AND_SET_NULL_IF_ERROR(
+              &responses[r],
+              TRITONBACKEND_ResponseOutput(
+                  responses[r], &out,
+                  StateForModel()->OutputTensorName().c_str(),
+                  TRITONSERVER_TYPE_INT32,
+                  shape.data(), shape.size()));
+  
+          if (out != nullptr) {
+            void* buf;
+            size_t bytes = ids.size() * sizeof(int32_t);
+            TRITONSERVER_MemoryType mt = TRITONSERVER_MEMORY_CPU;  int64_t id = 0;
+            RESPOND_AND_SET_NULL_IF_ERROR(
+                &responses[r],
+                TRITONBACKEND_OutputBuffer(out, &buf, bytes, &mt, &id));
+            std::memcpy(buf, ids.data(), bytes);
+          }
+        }
       }
-
-      RESPOND_AND_SET_NULL_IF_ERROR(
-          &responses[idx], TRITONBACKEND_ResponseOutput(
-                               responses[idx], &response_output,
-                               StateForModel()->OutputTensorName().c_str(),
-                               StateForModel()->OutputDataType(),
-                               out_shape.data(), out_shape.size()));
-      if (responses[idx] != nullptr) {
-        void *out_buffer;
-        size_t out_buffer_size =
-            TritonTypeSize(StateForModel()->OutputDataType()) * out_ids.size();
-        TRITONSERVER_MemoryType actual_memory_type = TRITONSERVER_MEMORY_CPU;
-        int64_t actual_memory_type_id = 0;
+  
+    //------------------------------------------------------------------
+    //  SINGLE-ITEM branch  (unchanged, but 32-bit IDs now)
+    //------------------------------------------------------------------
+    }  else {
+      for (size_t idx = 0; idx < translation_results.size(); ++idx) {
+        const std::vector<int32_t>& ids =
+            target_vocab.to_ids({translation_results[idx].output()})[0];
+    
+        std::vector<int64_t> shape = { static_cast<int64_t>(ids.size()) };
+        if (supports_first_dim_batching)
+          shape.insert(shape.begin(), 1);
+    
+        TRITONBACKEND_Output* out;
         RESPOND_AND_SET_NULL_IF_ERROR(
-            &responses[idx], TRITONBACKEND_OutputBuffer(
-                                 response_output, &out_buffer, out_buffer_size,
-                                 &actual_memory_type, &actual_memory_type_id));
-        ToOutBuffer(out_ids, StateForModel()->OutputDataType(), out_buffer);
+            &responses[idx],
+            TRITONBACKEND_ResponseOutput(
+                responses[idx], &out,
+                StateForModel()->OutputTensorName().c_str(),
+                TRITONSERVER_TYPE_INT32,   // <<< 32-bit
+                shape.data(), shape.size()));
+    
+        if (out != nullptr) {
+          void* buf;
+          size_t bytes = ids.size() * sizeof(int32_t);
+          TRITONSERVER_MemoryType mt = TRITONSERVER_MEMORY_CPU;  int64_t id = 0;
+          RESPOND_AND_SET_NULL_IF_ERROR(
+              &responses[idx],
+              TRITONBACKEND_OutputBuffer(out, &buf, bytes, &mt, &id));
+          std::memcpy(buf, ids.data(), bytes);
+        }
       }
-      idx += 1;
     }
+    
     // Send all the responses that haven't already been sent because of
     // an earlier error.
     for (auto &response : responses) {
@@ -886,13 +925,13 @@ public:
             "failed to send response");
       }
     }
-
+    
     // Done with the request objects so release them.
     for (uint32_t r = 0; r < request_count; ++r) {
       auto &request = requests[r];
       LOG_IF_ERROR(TRITONBACKEND_RequestRelease(
-                       request, TRITONSERVER_REQUEST_RELEASE_ALL),
-                   "failed releasing request");
+                      request, TRITONSERVER_REQUEST_RELEASE_ALL),
+                  "failed releasing request");
     }
 
     uint64_t exec_end_ns = 0;
@@ -1029,3 +1068,6 @@ TRITONBACKEND_ModelInstanceExecute(TRITONBACKEND_ModelInstance *instance,
 } // namespace ctranslate2
 } // namespace backend
 } // namespace triton
+
+
+////ghadi backend !!!!!!!!!!!!!!
