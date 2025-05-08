@@ -837,11 +837,11 @@ public:
     
     // Check if the request is batched (i.e. multiple examples in one request)
     if (total_batch_size > 1) {
-          size_t tr_idx = 0;                   // index in translation_results
+      size_t tr_idx = 0;   // walk through translation_results
 
       for (uint32_t r = 0; r < request_count; ++r) {
-
-        // ── 1. how many examples are in this Triton request? ──────────────────
+    
+        /* how many sentences are inside this Triton request? */
         size_t elems_in_req = 1;
         if (supports_batching_) {
           TRITONBACKEND_Input* in;
@@ -852,25 +852,25 @@ public:
                                         &sh, nullptr, nullptr, nullptr);
           elems_in_req = sh[0];
         }
-
-        // ── 2. build the rows and find the request-local max length ───────────
+    
+        // ── gather rows and remember the longest one ──────────────────────────
         std::vector<std::vector<int32_t>> rows;
         rows.reserve(elems_in_req);
-
+    
         size_t max_len = 0;
         for (size_t j = 0; j < elems_in_req; ++j, ++tr_idx) {
-          const auto ids_sz =
+          const auto ids_size_t =
               target_vocab.to_ids({translation_results[tr_idx].output()},
                                   /*unk_id*/1, /*prepend_bos*/false,
                                   /*append_eos*/false)[0];
-
-          rows.emplace_back(ids_sz.begin(), ids_sz.end());
+    
+          rows.emplace_back(ids_size_t.begin(), ids_size_t.end());
           max_len = std::max(max_len, rows.back().size());
         }
-
-        // ── 3. create the output tensor: [elems_in_req, max_len] ──────────────
+    
+        // ── create the tensor [elems_in_req, max_len] ─────────────────────────
         std::vector<int64_t> shape{static_cast<int64_t>(elems_in_req),
-                                    static_cast<int64_t>(max_len)};
+                                   static_cast<int64_t>(max_len)};
         TRITONBACKEND_Output* out;
         RESPOND_AND_SET_NULL_IF_ERROR(
             &responses[r],
@@ -879,22 +879,21 @@ public:
                 StateForModel()->OutputTensorName().c_str(),
                 TRITONSERVER_TYPE_INT32,
                 shape.data(), shape.size()));
-
-        if (out == nullptr) {
-          // response already flagged with error – skip copy
+    
+        if (out == nullptr)               // response already flagged with error
           continue;
-        }
-
-        // ── 4. flatten & pad each row to max_len (pad-id = 0) ────────────────
+    
+        // ── flatten the data, pad with EOS (= 2) ──────────────────────────────
         std::vector<int32_t> flat;
         flat.reserve(elems_in_req * max_len);
-
+    
+        const int32_t EOS_ID = 2;
         for (const auto& v : rows) {
           flat.insert(flat.end(), v.begin(), v.end());
-          flat.insert(flat.end(), max_len - v.size(), 0);      // PAD-ID = 0
+          flat.insert(flat.end(), max_len - v.size(), EOS_ID);
         }
-
-        // ── 5. copy to Triton buffer ──────────────────────────────────────────
+    
+        // ── copy to Triton buffer ─────────────────────────────────────────────
         void* buf = nullptr;
         const size_t bytes = flat.size() * sizeof(int32_t);
         TRITONSERVER_MemoryType mt = TRITONSERVER_MEMORY_CPU;
@@ -904,6 +903,9 @@ public:
             TRITONBACKEND_OutputBuffer(out, &buf, bytes, &mt, &id));
         std::memcpy(buf, flat.data(), bytes);
       }
+    
+    // ------------------------------------------------------------------
+    // single example (unchanged)
     } else {
       // Single example request remains unchanged.
       size_t idx = 0;
