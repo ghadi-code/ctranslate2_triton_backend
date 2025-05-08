@@ -837,11 +837,11 @@ public:
     
     // Check if the request is batched (i.e. multiple examples in one request)
     if (total_batch_size > 1) {
-      size_t tr_idx = 0;                    // index into translation_results
+      size_t tr_idx = 0;                 // index into translation_results
 
       for (uint32_t r = 0; r < request_count; ++r) {
     
-        // -------- how many examples are inside this Triton request?
+        /* how many examples are inside this Triton request? */
         size_t elems_in_req = 1;
         if (supports_batching_) {
           TRITONBACKEND_Input* in;
@@ -853,14 +853,16 @@ public:
           elems_in_req = sh[0];
         }
     
-        // 1st pass: convert tokens → ids, collect rows, find max length
+        //----------------------------------------------------------------
+        // 1st pass: tokens → ids, collect rows, find max length
+        //----------------------------------------------------------------
         std::vector<std::vector<int32_t>> rows;
         size_t max_len = 0;
     
         for (size_t j = 0; j < elems_in_req; ++j, ++tr_idx) {
-    
-          // ---------- A: raw tokens ----------
+          /* ---------- A: raw tokens ------------------------------- */
           const auto& toks = translation_results[tr_idx].output();
+    
           std::string joined;
           for (const auto& t : toks) joined += t + " ";
           LOG_MESSAGE(TRITONSERVER_LOG_INFO,
@@ -868,25 +870,25 @@ public:
                        " ex "  + std::to_string(j) +
                        " tokens: " + joined).c_str());
     
-          // ---------- B: ids after mapping ----
-          std::vector<size_t> ids_sz =
-              target_vocab.to_ids(               // <-- fixed: no `{toks}`
-                  toks,
-                  /*unk_id*/ 1,
-                  /*prepend_bos*/ false,
-                  /*append_eos */ false);
+          /* ---------- B: ids after mapping ------------------------ */
+          const auto ids_size_t =                         // <-- braces back!
+              target_vocab.to_ids({toks},
+                                  /*unk_id      */ 1,
+                                  /*prepend_bos */ false,
+                                  /*append_eos  */ false)[0];
     
           LOG_MESSAGE(TRITONSERVER_LOG_INFO,
                       ("[DBG] req " + std::to_string(r) +
                        " ex "  + std::to_string(j) +
-                       " ids size: " + std::to_string(ids_sz.size())).c_str());
+                       " ids size: " + std::to_string(ids_size_t.size())).c_str());
     
-          std::vector<int32_t> ids(ids_sz.begin(), ids_sz.end());
-          max_len = std::max(max_len, ids.size());
-          rows.emplace_back(std::move(ids));
+          rows.emplace_back(ids_size_t.begin(), ids_size_t.end());
+          max_len = std::max(max_len, rows.back().size());
         }
     
+        //----------------------------------------------------------------
         // allocate output tensor  {batch , max_len}
+        //----------------------------------------------------------------
         std::vector<int64_t> shape{static_cast<int64_t>(elems_in_req),
                                    static_cast<int64_t>(max_len)};
         TRITONBACKEND_Output* out;
@@ -901,8 +903,10 @@ public:
         if (out == nullptr)
           continue;
     
+        //----------------------------------------------------------------
         // flatten & pad
-        const int32_t EOS_ID = 2;         // or 0, as your post-step expects
+        //----------------------------------------------------------------
+        const int32_t EOS_ID = 2;           // use the ID your pipeline expects
         std::vector<int32_t> flat;
         flat.reserve(elems_in_req * max_len);
         for (const auto& v : rows) {
@@ -910,14 +914,15 @@ public:
           flat.insert(flat.end(), max_len - v.size(), EOS_ID);
         }
     
-        // ---------- C: final flat buffer ----------
         LOG_MESSAGE(TRITONSERVER_LOG_INFO,
                     ("[DBG] req " + std::to_string(r) +
                      " flat size: " + std::to_string(flat.size()) +
-                     " shape: [" + std::to_string(shape[0]) + "," +
+                     " shape: ["   + std::to_string(shape[0]) + "," +
                      std::to_string(shape[1]) + "]").c_str());
     
+        //----------------------------------------------------------------
         // copy to Triton buffer
+        //----------------------------------------------------------------
         void* buf;
         size_t bytes = flat.size() * sizeof(int32_t);
         TRITONSERVER_MemoryType mt = TRITONSERVER_MEMORY_CPU;
@@ -927,7 +932,6 @@ public:
             TRITONBACKEND_OutputBuffer(out, &buf, bytes, &mt, &id));
         std::memcpy(buf, flat.data(), bytes);
       }
-    
     // ------------------------------------------------------------------
     // single example (unchanged)
     } else {
@@ -978,6 +982,18 @@ public:
         idx += 1;
       }
     }
+
+
+
+
+
+
+
+
+
+
+
+
     
     // Send all the responses that haven't already been sent because of
     // an earlier error.
