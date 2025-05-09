@@ -966,6 +966,7 @@ public:
             as_size_t,
             StateForModel()->OutputDataType(),
             buf);
+          }
     
     
     } else {
