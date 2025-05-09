@@ -521,6 +521,7 @@ TRITONSERVER_Error *InputBufferToRaggedTokens(
     BackendInputCollector *collector,
     std::vector<std::vector<size_t>> *ragged_tokens,
     size_t *max_sequence_length, const std::string &input_name,
+
     bool is_ragged_input = true, bool supports_batching = true) {
   std::vector<std::vector<size_t>> tokens;
   tokens.reserve(request_count);
@@ -676,17 +677,31 @@ public:
   {
     std::vector<std::vector<size_t>> input_token_ids;
 
-    RETURN_IF_ERROR(
-      InputBufferToRaggedTokens(
-        total_batch_size,
-        requests,
-        request_count,
-        responses,
-        collector,
-        &input_token_ids, max_sequence_length,
-        StateForModel()->InputTensorName(),
-        StateForModel()->IsInputRagged(StateForModel()->InputTensorName()),
-        supports_batching_)
+    // RETURN_IF_ERROR(
+    //   InputBufferToRaggedTokens(
+    //     total_batch_size,
+    //     requests,
+    //     request_count,
+    //     responses,
+    //     collector,
+    //     &input_token_ids, max_sequence_length,
+    //     StateForModel()->InputTensorName(),
+    //     StateForModel()->IsInputRagged(StateForModel()->InputTensorName()),
+    //     supports_batching_)
+    //   );
+
+     // FORCE each request to remain one full sequence (no internal splitting)
+      RETURN_IF_ERROR(
+        InputBufferToRaggedTokens(
+          total_batch_size,
+          requests,
+          request_count,
+          responses,
+          collector,
+          &input_token_ids, max_sequence_length,
+          StateForModel()->InputTensorName(),
+          false,               // <-- override ragged → always single sequence
+          supports_batching_)
       );
 
     *input_tokens = source_vocab.to_tokens(input_token_ids);
@@ -835,6 +850,12 @@ public:
         StateForModel()->SupportsFirstDimBatching(&supports_first_dim_batching)
     );
     
+
+
+
+
+
+
     // Check if the request is batched (i.e. multiple examples in one request)
     if (total_batch_size > 1) {
       size_t tr_idx = 0;     // index into translation_results
@@ -892,7 +913,8 @@ public:
             TRITONBACKEND_ResponseOutput(
                 responses[r], &out,
                 StateForModel()->OutputTensorName().c_str(),
-                TRITONSERVER_TYPE_INT32,
+                // TRITONSERVER_TYPE_INT32,
+                StateForModel()->OutputDataType(),
                 shape.data(), shape.size()));
     
         if (out == nullptr)
@@ -919,15 +941,31 @@ public:
         //--------------------------------------------------------------
         // copy into Triton buffer
         //--------------------------------------------------------------
-        void* buf;
-        size_t bytes = flat.size() * sizeof(int32_t);
-        TRITONSERVER_MemoryType mt = TRITONSERVER_MEMORY_CPU;
-        int64_t id = 0;
-        RESPOND_AND_SET_NULL_IF_ERROR(
-            &responses[r],
-            TRITONBACKEND_OutputBuffer(out, &buf, bytes, &mt, &id));
-        std::memcpy(buf, flat.data(), bytes);
-      }
+      //   void* buf;
+      //   size_t bytes = flat.size() * sizeof(int32_t);
+      //   TRITONSERVER_MemoryType mt = TRITONSERVER_MEMORY_CPU;
+      //   int64_t id = 0;
+      //   RESPOND_AND_SET_NULL_IF_ERROR(
+      //       &responses[r],
+      //       TRITONBACKEND_OutputBuffer(out, &buf, bytes, &mt, &id));
+      //   std::memcpy(buf, flat.data(), bytes);
+      // }
+
+          void* buf;
+          size_t byte_size =
+            flat.size() *
+            TritonTypeSize(StateForModel()->OutputDataType());
+          TRITONSERVER_MemoryType mt = TRITONSERVER_MEMORY_CPU;
+          int64_t id = 0;
+          RESPOND_AND_SET_NULL_IF_ERROR(
+              &responses[r],
+              TRITONBACKEND_OutputBuffer(out, &buf, byte_size, &mt, &id));
+            // Convert from int32 stream → correct Triton type
+          std::vector<size_t> as_size_t(flat.begin(), flat.end());
+          ToOutBuffer(
+            as_size_t,
+            StateForModel()->OutputDataType(),
+            buf);
     
     
     } else {
